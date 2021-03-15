@@ -131,6 +131,7 @@ WITH ordersize_by_user AS
 SELECT 
  --   a.user_id --would group by user id if the environment let me download more lines - as it is need to group at higher level before exporting
     e.segment
+  , count (DISTINCT a.user_id) as total_users  
   , avg(d.frequency) as average_frequency
   , avg(c.average_order_size) as average_spend_per_customer
   , sum(a.basket) as total_revenue
@@ -144,15 +145,9 @@ FROM `bi-2019-test.ad_hoc.orders_jan2021` a
           ON e.user_id = a.user_id
   INNER JOIN seg_rev_bkfast b
           ON e.segment = b.segment
-GROUP BY 1 ORDER BY 4 DESC
+GROUP BY 1 ORDER BY 6 DESC
 ;
 
-/*
-segment                  	no_users	  total_revenue      no_orders	    pct_breakfast
-big-ticket/low-frequency.   52177      1339972.7500000342   83993       0.07781649291002211
-small-ticket/low-frequency  89735      1045115.9600000432  162995       0.2939099217277131
-small-ticket/high-frequency 17659       804838.8000000229  131113       0.35859229202170495
-big-ticket/high-frequency.   3383       299353.3499999974   21899       0.1523335215724168
 
-Hypothesis confirmed.
-*/
+--Hypothesis confirmed (highest % breakfast in small-ticket/high-frequency). Exporting output for visualization
+
