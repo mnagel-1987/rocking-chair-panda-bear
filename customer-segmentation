@@ -1,0 +1,234 @@
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------USER SEGMENTATION ANALYSIS - MICHAEL NAGEL -----------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+--METHODOLOGY: 
+-- A) IDENTIFY PERCENTILE CUTOFFS 
+-- B) CREATE SEGMENTS (EXAMPLE)
+-- C) DESCRIBE SEGMENTS 
+-- D) IDENTIFY HIGH-AFFINITY SEGMENT
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------- A) IDENTIFY PERCENTILE CUTOFFS  ---------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+-- Identify percentiles cutoffs for order size and frequency to group into three groups by exploring distribution of basket size and frequency. 
+-- The objective is to cut the universe into four groups: high-frequency/big-ticket, high-frequency/small-ticket, low-frequency/big-ticket and low-frequency/low-ticket
+-- distribution skew will define the right cutoff points 
+
+WITH ordersize_by_user AS 
+   ( SELECT 
+              user_id
+            , avg(basket) as average_order_size
+    FROM `bi-2019-test.ad_hoc.orders_jan2021`
+    GROUP BY 1 ORDER BY 2
+   )
+SELECT
+        max(average_order_size) as max
+      , approx_quantiles(average_order_size, 100 IGNORE NULLS )  [OFFSET(90)]  AS percentile_90
+      , approx_quantiles(average_order_size, 100 IGNORE NULLS )  [OFFSET(66)] AS percentile_66
+      , avg(average_order_size) as avg 
+      , approx_quantiles(average_order_size, 100 IGNORE NULLS )  [OFFSET(50)] AS med        
+      , approx_quantiles(average_order_size, 100 IGNORE NULLS )  [OFFSET(33)]  AS percentile_33
+      , approx_quantiles(average_order_size, 100 IGNORE NULLS )  [OFFSET(10)] AS percentile_10
+      , min(average_order_size) as min
+FROM ordersize_by_user
+
+/*
+RESULT:
+   max	percentile_90	percentile_66 avg med	percentile_33	percentile_10	min	
+	134.5    17.4.           10.5   9.74  8.1    6.24            3.9     0.0
+ relatively even distribution with slight skew to the right - will take 66th percentile as cutoff
+*/
+
+;
+WITH freq_by_user AS 
+   ( SELECT 
+              user_id
+            , count(distinct order_id) as frequency
+    FROM `bi-2019-test.ad_hoc.orders_jan2021`
+    GROUP BY 1 ORDER BY 2
+   )
+SELECT
+        max(frequency ) as max
+      , approx_quantiles(frequency, 100 IGNORE NULLS )  [OFFSET(90)]  AS percentile_90
+      , approx_quantiles(frequency, 100 IGNORE NULLS )  [OFFSET(66)] AS percentile_66
+      , avg(frequency) as avg 
+      , approx_quantiles(frequency, 100 IGNORE NULLS )  [OFFSET(50)] AS med        
+      , approx_quantiles(frequency, 100 IGNORE NULLS )  [OFFSET(33)]  AS percentile_33
+      , approx_quantiles(frequency, 100 IGNORE NULLS )  [OFFSET(10)] AS percentile_10
+      , min(frequency) as min
+FROM freq_by_user
+
+/*
+RESULT
+max	percentile_90	percentile_66	avg	med	percentile_33	percentile_10	min	
+33      5            2         2.45 2         1          1         1
+
+Strong right skew - will use percentiles 90 as cutoff 
+*/
+
+--Note: with create table access the segment cutoffs points could be coded so that they change dynamically instead of being hard-coded in following steps
+;
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------- B) DEFINE SEGMENTS  ---------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+
+--define segment per user
+-- create table access rights missing - the following  query does not work so part C and beyond are using a workaround 
+-- using the following query as a reference table would be the ideal solution in a real-world environment so leaving it here 
+
+CREATE TABLE ad_hoc.user_segments AS 
+(
+    WITH ordersize_by_user AS 
+      ( SELECT 
+                  user_id
+                , avg(basket) as average_order_size
+        FROM `bi-2019-test.ad_hoc.orders_jan2021`
+        GROUP BY 1 ORDER BY 2
+      )
+    , freq_by_user AS 
+      ( SELECT 
+                  user_id
+                , count(distinct order_id) as frequency
+        FROM `bi-2019-test.ad_hoc.orders_jan2021`
+        GROUP BY 1 ORDER BY 2
+      )
+    SELECT 
+              a.user_id
+            , CASE 
+                  WHEN average_order_size >= 10.5 AND frequency >= 5 THEN 'big-ticket/high-frequency'
+                  WHEN average_order_size < 10.5 AND frequency >= 5 THEN 'small-ticket/high-frequency'
+                  WHEN average_order_size >= 10.5 AND frequency < 5 THEN 'big-ticket/low-frequency'
+                  ELSE 'small-ticket/low-frequency' END segment
+    FROM ordersize_by_user a 
+      INNER JOIN freq_by_user b 
+          ON a.user_id = b.user_id
+    ORDER BY 2
+)
+; 
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------- C) DESCRIBE SEGMENTS  -------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+
+-- describe segments: how many users, total number of orders, total revenue
+-- this code could be shortened by building a reference table as described under B) with create table access 
+
+WITH ordersize_by_user AS 
+  ( SELECT 
+              user_id
+            , avg(basket) as average_order_size
+    FROM `bi-2019-test.ad_hoc.orders_jan2021`
+    GROUP BY 1 ORDER BY 2
+  )
+, freq_by_user AS 
+  ( SELECT 
+              user_id
+            , count(distinct order_id) as frequency
+    FROM `bi-2019-test.ad_hoc.orders_jan2021`
+    GROUP BY 1 ORDER BY 2
+  )
+, segment_def AS 
+  ( SELECT 
+              a.user_id
+            , CASE 
+                  WHEN average_order_size >= 10.5 AND frequency >= 5 THEN 'big-ticket/high-frequency'
+                  WHEN average_order_size < 10.5 AND frequency >= 5 THEN 'small-ticket/high-frequency'
+                  WHEN average_order_size >= 10.5 AND frequency < 5 THEN 'big-ticket/low-frequency'
+                  ELSE 'small-ticket/low-frequency' 
+              END segment
+    FROM ordersize_by_user a 
+    INNER JOIN freq_by_user b 
+          ON a.user_id = b.user_id
+   )
+SELECT 
+    d.segment
+  , COUNT (DISTINCT c.user_id) as no_users
+  , SUM(c.basket) as total_revenue
+  , COUNT (DISTINCT c.order_id) as no_orders
+FROM  `bi-2019-test.ad_hoc.orders_jan2021` c
+  INNER JOIN segment_def d
+          ON c.user_id = d.user_id
+GROUP BY 1 ORDER BY 3 DESC
+;
+
+/*
+segment                	no_users	total_revenue	      no_orders	
+big-ticket/low-frequency.   52177  1339972.7500000342   83993
+small-ticket/low-frequency  89735  1045115.9600000432  162995
+small-ticket/high-frequency 17659   804838.8000000229  131113
+big-ticket/high-frequency.   3383   299353.3499999974   21899
+*/
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------- D) IDENTIFY HIGH-AFFINITY SEGMENT  ------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------------
+--note: hypothesis would be that small-ticket/high-frequency is the highest-affinity segment for breakfast/coffee 
+--approach: calculate % of revenue generated in segment that is created by breakfast category
+-- this code could be shortened by building a reference table as described under B) with create table access 
+
+WITH ordersize_by_user AS 
+  ( SELECT 
+              user_id
+            , avg(basket) as average_order_size
+    FROM `bi-2019-test.ad_hoc.orders_jan2021`
+    GROUP BY 1 ORDER BY 2
+  )
+, freq_by_user AS 
+  ( SELECT 
+              user_id
+            , count(distinct order_id) as frequency
+    FROM `bi-2019-test.ad_hoc.orders_jan2021`
+    GROUP BY 1 ORDER BY 2
+  )
+, segment_def AS 
+  ( SELECT 
+              a.user_id
+            , CASE 
+                  WHEN average_order_size >= 10.5 AND frequency >= 5 THEN 'big-ticket/high-frequency'
+                  WHEN average_order_size < 10.5 AND frequency >= 5 THEN 'small-ticket/high-frequency'
+                  WHEN average_order_size >= 10.5 AND frequency < 5 THEN 'big-ticket/low-frequency'
+                  ELSE 'small-ticket/low-frequency' 
+              END segment
+    FROM ordersize_by_user a 
+    INNER JOIN freq_by_user b 
+          ON a.user_id = b.user_id
+   )
+, segment_rev AS 
+  ( SELECT 
+              b.segment
+            , sum(a.basket) as rev
+    FROM `bi-2019-test.ad_hoc.orders_jan2021` a
+      INNER JOIN segment_def b
+        ON a.user_id = b.user_id
+    GROUP BY 1 
+  )
+, segment_rev_bkfast AS 
+  ( SELECT 
+              b.segment
+            , sum(a.basket) as rev_bkfast
+    FROM `bi-2019-test.ad_hoc.orders_jan2021` a
+      INNER JOIN segment_def b
+        ON a.user_id = b.user_id
+    WHERE a.cuisine_parent ='Breakfast'
+    GROUP BY 1 
+  )
+SELECT 
+    a.segment
+  , b.rev_bkfast/a.rev as pct_bkfast
+FROM segment_rev a
+  INNER JOIN segment_rev_bkfast b
+          ON a.segment = b.segment
+ORDER BY 2 DESC
+
+/*
+segment	                     pct_bkfast	
+small-ticket/high-frequency. 0.35859229202170406
+small-ticket/low-frequency.  0.29390992172771463
+big-ticket/high-frequency.   0.1523335215724168
+big-ticket/low-frequency.    0.07781649291002181
+
+Hypothesis confirmed.
+*/
+;
